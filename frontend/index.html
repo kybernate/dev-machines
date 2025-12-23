@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>FastAiSwitch Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Chart.js via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e5e7eb;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .sidebar {
+      flex: 1;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-right: 1px solid #1f2937;
+      box-sizing: border-box;
+      min-width: 320px;
+      max-width: 480px;
+    }
+
+    .main {
+      flex: 1;
+      padding: 16px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+    }
+
+    .card {
+      background: #111827;
+      border-radius: 12px;
+      padding: 10px 12px;
+      box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.08);
+    }
+
+    .card h2 {
+      margin: 0 0 6px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: #9ca3af;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .small {
+      font-size: 11px;
+      color: #6b7280;
+    }
+
+    /* Charts nebeneinander, wieder höher */
+    .charts-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .chart-card {
+      padding: 8px 10px;
+    }
+
+    .chart-container {
+      height: 160px; /* höher gemacht */
+    }
+
+    canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .table th, .table td {
+      padding: 4px 6px;
+      border-bottom: 1px solid #1f2937;
+      text-align: left;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 6px;
+      border-radius: 999px;
+      font-size: 11px;
+    }
+
+    .badge-active {
+      background: rgba(16, 185, 129, 0.15);
+      color: #6ee7b7;
+    }
+
+    .badge-suspended {
+      background: rgba(59, 130, 246, 0.15);
+      color: #93c5fd;
+    }
+
+    .badge-unknown {
+      background: rgba(148, 163, 184, 0.15);
+      color: #e5e7eb;
+    }
+
+    /* Chat layout */
+
+    .chat-card {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0; /* wichtig für Scrollbarkeit innerhalb der Karte */
+    }
+
+    .chat-header {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .chat-header select, .chat-header button {
+      background: #020617;
+      border: 1px solid #1f2937;
+      border-radius: 999px;
+      color: #e5e7eb;
+      font-size: 13px;
+      padding: 6px 10px;
+    }
+
+    .chat-header button {
+      cursor: pointer;
+    }
+
+    .chat-box {
+      flex: 1;
+      min-height: 0;          /* wichtig: darf wachsen/kleiner werden */
+      background: #020617;
+      border-radius: 12px;
+      padding: 8px 10px;
+      border: 1px solid #1f2937;
+      overflow-y: auto;       /* jetzt wirklich scrollbar */
+      font-size: 13px;
+    }
+
+    .message {
+      margin-bottom: 8px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #111827;
+    }
+
+    .message-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 2px;
+    }
+
+    .message-role {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #9ca3af;
+    }
+
+    .message-model {
+      font-size: 11px;
+      color: #6b7280;
+      font-style: italic;
+    }
+
+    .message-body {
+      font-size: 13px;
+      white-space: pre-wrap;
+    }
+
+    .chat-input {
+      margin-top: 6px;
+      display: flex;
+      gap: 8px;
+    }
+
+    .chat-input textarea {
+      flex: 1;
+      resize: none;
+      min-height: 60px;
+      max-height: 100px;
+      background: #020617;
+      border-radius: 12px;
+      border: 1px solid #1f2937;
+      padding: 8px 10px;
+      color: #e5e7eb;
+      font-size: 13px;
+    }
+
+    .chat-input button {
+      background: #22c55e;
+      border: none;
+      color: #022c22;
+      font-weight: 600;
+      border-radius: 999px;
+      padding: 8px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      align-self: flex-end;
+      height: 34px;
+    }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <!-- Charts nebeneinander -->
+    <div class="charts-row">
+      <div class="card chart-card">
+        <h2>GPU VRAM</h2>
+        <div class="chart-container">
+          <canvas id="vramChart"></canvas>
+        </div>
+        <div class="small" id="vramInfo"></div>
+      </div>
+      <div class="card chart-card">
+        <h2>RAM</h2>
+        <div class="chart-container">
+          <canvas id="ramChart"></canvas>
+        </div>
+        <div class="small" id="ramInfo"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Request Queues</h2>
+      <table class="table" id="queueTable">
+        <thead>
+          <tr>
+            <th>Backend</th>
+            <th>Queue-Size</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Model Status</h2>
+      <table class="table" id="modelTable">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Backend</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="card chat-card">
+      <div class="chat-header">
+        <span class="small">Model:</span>
+        <select id="modelSelect"></select>
+        <span class="small" id="activeBackendLabel"></span>
+      </div>
+      <div class="chat-box" id="chatBox"></div>
+      <div class="chat-input">
+        <textarea id="chatInput" placeholder="Frag dein Modell..."></textarea>
+        <button id="sendBtn">Senden</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const CONTROLLER_BASE = window.location.origin.replace(/:\d+$/, ":8000");
+
+    // ---- Charts setup ----
+    const vramCtx = document.getElementById("vramChart").getContext("2d");
+    const ramCtx = document.getElementById("ramChart").getContext("2d");
+
+    const vramData = {
+      labels: [],
+      datasets: [{
+        label: "VRAM used (MB)",
+        data: [],
+        borderWidth: 2,
+        fill: false,
+        tension: 0.25,
+        pointRadius: 0
+      }]
+    };
+
+    const ramData = {
+      labels: [],
+      datasets: [{
+        label: "RAM used (MB)",
+        data: [],
+        borderWidth: 2,
+        fill: false,
+        tension: 0.25,
+        pointRadius: 0
+      }]
+    };
+
+    const commonOptions = {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: {
+          display: false
+        }
+      },
+      scales: {
+        x: {
+          display: false
+        },
+        y: {
+          beginAtZero: true,
+          ticks: {
+            color: "#9ca3af",
+            font: { size: 10 }
+          },
+          grid: {
+            color: "rgba(55, 65, 81, 0.4)"
+          }
+        }
+      }
+    };
+
+    const vramChart = new Chart(vramCtx, {
+      type: "line",
+      data: vramData,
+      options: commonOptions
+    });
+
+    const ramChart = new Chart(ramCtx, {
+      type: "line",
+      data: ramData,
+      options: commonOptions
+    });
+
+    function addPoint(chart, value) {
+      const maxPoints = 60; // ca. 30 Sekunden bei 500ms
+      chart.data.labels.push("");
+      chart.data.datasets[0].data.push(value);
+      if (chart.data.labels.length > maxPoints) {
+        chart.data.labels.shift();
+        chart.data.datasets[0].data.shift();
+      }
+      chart.update("none");
+    }
+
+    // ---- DOM Elements ----
+    const vramInfo = document.getElementById("vramInfo");
+    const ramInfo = document.getElementById("ramInfo");
+    const queueTableBody = document.querySelector("#queueTable tbody");
+    const modelTableBody = document.querySelector("#modelTable tbody");
+    const modelSelect = document.getElementById("modelSelect");
+    const chatBox = document.getElementById("chatBox");
+    const chatInput = document.getElementById("chatInput");
+    const sendBtn = document.getElementById("sendBtn");
+    const activeBackendLabel = document.getElementById("activeBackendLabel");
+
+    let availableModels = [];
+
+    // ---- Models laden ----
+    async function loadModels() {
+      try {
+        const res = await fetch(`${CONTROLLER_BASE}/v1/models`);
+        const json = await res.json();
+        const data = json.data || [];
+        availableModels = data.map(m => m.id);
+        modelSelect.innerHTML = "";
+        availableModels.forEach(m => {
+          const opt = document.createElement("option");
+          opt.value = m;
+          opt.textContent = m;
+          modelSelect.appendChild(opt);
+        });
+      } catch (e) {
+        console.error("Failed to load models:", e);
+      }
+    }
+
+    // ---- Dashboard Polling ----
+    async function pollMetricsAndStatus() {
+      try {
+        const [metricsRes, statusRes] = await Promise.all([
+          fetch(`${CONTROLLER_BASE}/metrics/resources`),
+          fetch(`${CONTROLLER_BASE}/status`)
+        ]);
+        const metrics = await metricsRes.json();
+        const status = await statusRes.json();
+
+        // VRAM
+        const gpu = metrics.gpu || {};
+        const vUsed = gpu.used_mb || 0;
+        const vTotal = gpu.total_mb || 0;
+        vramInfo.textContent = `Used: ${vUsed} MB / Total: ${vTotal} MB`;
+        addPoint(vramChart, vUsed);
+
+        // RAM
+        const ram = metrics.ram || {};
+        const rUsed = ram.used_mb || 0;
+        const rTotal = ram.total_mb || 0;
+        ramInfo.textContent = `Used: ${rUsed} MB / Total: ${rTotal} MB`;
+        addPoint(ramChart, rUsed);
+
+        // Queues
+        queueTableBody.innerHTML = "";
+        const backends = status.backends || {};
+        const activeBackend = status.active_backend;
+        for (const [name, info] of Object.entries(backends)) {
+          const tr = document.createElement("tr");
+          const tdName = document.createElement("td");
+          const tdQueue = document.createElement("td");
+          tdName.textContent = name + (name === activeBackend ? " (active)" : "");
+          tdQueue.textContent = info.queue_size ?? 0;
+          tr.appendChild(tdName);
+          tr.appendChild(tdQueue);
+          queueTableBody.appendChild(tr);
+        }
+
+        // Model status
+        modelTableBody.innerHTML = "";
+        const models = status.models || {};
+        for (const [mid, info] of Object.entries(models)) {
+          const tr = document.createElement("tr");
+          const tdModel = document.createElement("td");
+          const tdBackend = document.createElement("td");
+          const tdStatus = document.createElement("td");
+
+          tdModel.textContent = mid;
+          tdBackend.textContent = info.backend || "-";
+
+          const span = document.createElement("span");
+          span.classList.add("badge");
+          const st = (info.status || "").toUpperCase();
+          if (st === "ACTIVE") {
+            span.classList.add("badge-active");
+            span.textContent = "ACTIVE";
+          } else if (st === "SUSPENDED") {
+            span.classList.add("badge-suspended");
+            span.textContent = "SUSPENDED";
+          } else {
+            span.classList.add("badge-unknown");
+            span.textContent = st || "UNKNOWN";
+          }
+          tdStatus.appendChild(span);
+
+          tr.appendChild(tdModel);
+          tr.appendChild(tdBackend);
+          tr.appendChild(tdStatus);
+          modelTableBody.appendChild(tr);
+        }
+
+        if (status.active_backend) {
+          activeBackendLabel.textContent = `Aktives Backend: ${status.active_backend}`;
+        } else {
+          activeBackendLabel.textContent = "Aktives Backend: -";
+        }
+
+      } catch (e) {
+        console.error("Failed to poll metrics/status:", e);
+      }
+    }
+
+    setInterval(pollMetricsAndStatus, 500);
+
+    // ---- Chat UI Helfer ----
+
+    function createMessageElement(role, model, text) {
+      const msg = document.createElement("div");
+      msg.classList.add("message");
+
+      const header = document.createElement("div");
+      header.classList.add("message-header");
+
+      const roleSpan = document.createElement("span");
+      roleSpan.classList.add("message-role");
+      roleSpan.textContent = role === "user" ? "User" : "Assistant";
+
+      const modelSpan = document.createElement("span");
+      modelSpan.classList.add("message-model");
+      if (model) {
+        modelSpan.textContent = `Model: ${model}`;
+      } else {
+        modelSpan.textContent = "";
+      }
+
+      header.appendChild(roleSpan);
+      header.appendChild(modelSpan);
+
+      const body = document.createElement("div");
+      body.classList.add("message-body");
+      body.textContent = text || "";
+
+      msg.appendChild(header);
+      msg.appendChild(body);
+
+      chatBox.appendChild(msg);
+      chatBox.scrollTop = chatBox.scrollHeight;
+
+      return { root: msg, body };
+    }
+
+    async function sendMessage() {
+      const content = chatInput.value.trim();
+      if (!content) return;
+
+      const model = modelSelect.value;
+      if (!model) {
+        alert("Kein Modell ausgewählt.");
+        return;
+      }
+
+      // User-Message hinzufügen
+      createMessageElement("user", null, content);
+      chatInput.value = "";
+
+      // Assistant-Message vorbereiten (wird gestreamt)
+      const { body: assistantBody } = createMessageElement("assistant", model, "");
+
+      try {
+        const body = {
+          model: model,
+          messages: [{ role: "user", content }],
+          stream: true,
+        };
+
+        const resp = await fetch(`${CONTROLLER_BASE}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+
+        if (!resp.ok || !resp.body) {
+          const errorText = await resp.text();
+          assistantBody.textContent = `Fehler: ${errorText}`;
+          return;
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        let assistantText = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+
+          for (const part of parts) {
+            if (!part.startsWith("data:")) continue;
+            const dataStr = part.slice(5).trim();
+            if (!dataStr || dataStr === "[DONE]") {
+              continue;
+            }
+            let payload;
+            try {
+              payload = JSON.parse(dataStr);
+            } catch (e) {
+              console.warn("Failed to parse SSE data:", dataStr);
+              continue;
+            }
+
+            const choice = (payload.choices && payload.choices[0]) || null;
+            if (!choice) continue;
+            const delta = choice.delta || {};
+            const chunk = delta.content || "";
+            if (chunk) {
+              assistantText += chunk;
+              assistantBody.textContent = assistantText;
+              chatBox.scrollTop = chatBox.scrollHeight;
+            }
+          }
+        }
+
+      } catch (e) {
+        console.error("Streaming error:", e);
+        assistantBody.textContent = "Fehler beim Streamen der Antwort.";
+      }
+    }
+
+    sendBtn.addEventListener("click", sendMessage);
+    chatInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        sendMessage();
+      }
+    });
+
+    // Initial
+    loadModels();
+    pollMetricsAndStatus();
+  </script>
+</body>
+</html>

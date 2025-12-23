@@ -1,0 +1,119 @@
+services:
+  vllm-model-a:
+    build:
+      context: ./vllm
+      args:
+        VLLM_VERSION: ${VLLM_VERSION:-v0.10.2}
+    image: vllm-checkpoint-a:${VLLM_VERSION:-v0.10.2}
+    container_name: vllm-model-a
+    runtime: nvidia
+    #pid: "host"
+    #privileged: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all      # oder "all" – je nach Setup
+              capabilities: [gpu]
+    ipc: host
+    environment:
+      - VLLM_USE_V1=0
+      - CHECKPOINT_SERVICE_PORT=9000
+    volumes:
+      - ./.cache/models:/root/.cache/huggingface
+      - ./.cache/vllm:/root/.cache/vllm
+    ports:
+      - "8001:8000"  # vLLM
+      - "9001:9000"  # Checkpoint-Service
+    command: >
+      --model ${MODEL_A}
+      --served-model-name ${MODEL_NAME_A}
+      --quantization awq
+      --dtype half
+      --max-model-len 8192
+      --gpu-memory-utilization ${GPU_MEM_UTIL}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/ready"]
+      interval: 30s
+      timeout: 15s
+      retries: 25
+
+  vllm-model-b:
+    build:
+      context: ./vllm
+      args:
+        VLLM_VERSION: ${VLLM_VERSION:-v0.10.2}
+    image: vllm-checkpoint-b:${VLLM_VERSION:-v0.10.2}
+    container_name: vllm-model-b
+    runtime: nvidia
+    #pid: "host"
+    #privileged: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ipc: host
+    environment:
+      - VLLM_USE_V1=0
+      - CHECKPOINT_SERVICE_PORT=9000
+    volumes:
+      - ./.cache/models:/root/.cache/huggingface
+      - ./.cache/vllm:/root/.cache/vllm
+    ports:
+      - "8002:8000"  # vLLM API
+      - "9002:9000"  # Checkpoint-Service
+    command: >
+      --model ${MODEL_B}
+      --served-model-name ${MODEL_NAME_B}
+      --quantization awq
+      --dtype half
+      --max-model-len 8192
+      --gpu-memory-utilization ${GPU_MEM_UTIL}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/ready"]
+      interval: 30s
+      timeout: 15s
+      retries: 25
+    depends_on:
+      vllm-model-a:
+        condition: service_healthy
+
+  controller:
+    build:
+      context: ./controller
+    image: vllm-controller:latest
+    container_name: vllm-controller
+    runtime: nvidia          # wichtig für nvidia-smi im Controller
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      vllm-model-a:
+        condition: service_healthy
+      vllm-model-b:
+        condition: service_healthy
+    environment:
+      - BACKEND_CONTAINERS=${BACKEND_CONTAINERS}
+      - MAX_REQUESTS_PER_WINDOW=${MAX_REQUESTS_PER_WINDOW}
+      - MAX_WINDOW_DURATION_MS=${MAX_WINDOW_DURATION_MS}
+      - IDLE_SLEEP_MS=${IDLE_SLEEP_MS}
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+    image: vllm-frontend:latest
+    container_name: vllm-frontend
+    depends_on:
+      - controller
+    ports:
+      - "3000:80"
