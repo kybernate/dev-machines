@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <title>FastAiSwitch Dashboard</title>
@@ -60,7 +60,7 @@
       color: #6b7280;
     }
 
-    /* Charts nebeneinander, wieder höher */
+    /* Charts side by side, higher again */
     .charts-row {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -72,7 +72,7 @@
     }
 
     .chart-container {
-      height: 160px; /* höher gemacht */
+      height: 160px; /* made higher */
     }
 
     canvas {
@@ -121,7 +121,7 @@
       flex: 1;
       display: flex;
       flex-direction: column;
-      min-height: 0; /* wichtig für Scrollbarkeit innerhalb der Karte */
+      min-height: 0; /* important for scrollability within the card */
     }
 
     .chat-header {
@@ -146,12 +146,12 @@
 
     .chat-box {
       flex: 1;
-      min-height: 0;          /* wichtig: darf wachsen/kleiner werden */
+      min-height: 0;          /* important: may grow/shrink */
       background: #020617;
       border-radius: 12px;
       padding: 8px 10px;
       border: 1px solid #1f2937;
-      overflow-y: auto;       /* jetzt wirklich scrollbar */
+      overflow-y: auto;       /* now really scrollable */
       font-size: 13px;
     }
 
@@ -222,7 +222,7 @@
 </head>
 <body>
   <div class="sidebar">
-    <!-- Charts nebeneinander -->
+    <!-- Charts side by side -->
     <div class="charts-row">
       <div class="card chart-card">
         <h2>GPU VRAM</h2>
@@ -246,7 +246,7 @@
         <thead>
           <tr>
             <th>Backend</th>
-            <th>Queue-Size</th>
+            <th>Queue Size</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -277,8 +277,8 @@
       </div>
       <div class="chat-box" id="chatBox"></div>
       <div class="chat-input">
-        <textarea id="chatInput" placeholder="Frag dein Modell..."></textarea>
-        <button id="sendBtn">Senden</button>
+        <textarea id="chatInput" placeholder="Ask your model..."></textarea>
+        <button id="sendBtn">Send</button>
       </div>
     </div>
   </div>
@@ -353,7 +353,7 @@
     });
 
     function addPoint(chart, value) {
-      const maxPoints = 60; // ca. 30 Sekunden bei 500ms
+      const maxPoints = 60; // approx. 30 seconds at 500ms
       chart.data.labels.push("");
       chart.data.datasets[0].data.push(value);
       if (chart.data.labels.length > maxPoints) {
@@ -376,7 +376,7 @@
 
     let availableModels = [];
 
-    // ---- Models laden ----
+    // ---- Load models ----
     async function loadModels() {
       try {
         const res = await fetch(`${CONTROLLER_BASE}/v1/models`);
@@ -395,7 +395,7 @@
       }
     }
 
-    // ---- Dashboard Polling ----
+    // ---- Dashboard polling ----
     async function pollMetricsAndStatus() {
       try {
         const [metricsRes, statusRes] = await Promise.all([
@@ -468,9 +468,9 @@
         }
 
         if (status.active_backend) {
-          activeBackendLabel.textContent = `Aktives Backend: ${status.active_backend}`;
+          activeBackendLabel.textContent = `Active Backend: ${status.active_backend}`;
         } else {
-          activeBackendLabel.textContent = "Aktives Backend: -";
+          activeBackendLabel.textContent = "Active Backend: -";
         }
 
       } catch (e) {
@@ -480,7 +480,7 @@
 
     setInterval(pollMetricsAndStatus, 500);
 
-    // ---- Chat UI Helfer ----
+    // ---- Chat UI helpers ----
 
     function createMessageElement(role, model, text) {
       const msg = document.createElement("div");
@@ -523,15 +523,15 @@
 
       const model = modelSelect.value;
       if (!model) {
-        alert("Kein Modell ausgewählt.");
+        alert("No model selected.");
         return;
       }
 
-      // User-Message hinzufügen
+      // Add user message
       createMessageElement("user", null, content);
       chatInput.value = "";
 
-      // Assistant-Message vorbereiten (wird gestreamt)
+      // Prepare assistant message (will be streamed)
       const { body: assistantBody } = createMessageElement("assistant", model, "");
 
       try {
@@ -551,7 +551,7 @@
 
         if (!resp.ok || !resp.body) {
           const errorText = await resp.text();
-          assistantBody.textContent = `Fehler: ${errorText}`;
+          assistantBody.textContent = `Error: ${errorText}`;
           return;
         }
 
@@ -596,7 +596,7 @@
 
       } catch (e) {
         console.error("Streaming error:", e);
-        assistantBody.textContent = "Fehler beim Streamen der Antwort.";
+        assistantBody.textContent = "Error streaming the response.";
       }
     }
 

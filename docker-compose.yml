@@ -14,7 +14,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all      # oder "all" – je nach Setup
+              count: all      # or "all" – depending on setup
               capabilities: [gpu]
     ipc: host
     environment:
@@ -25,7 +25,7 @@ services:
       - ./.cache/vllm:/root/.cache/vllm
     ports:
       - "8001:8000"  # vLLM
-      - "9001:9000"  # Checkpoint-Service
+      - "9001:9000"  # Checkpoint Service
     command: >
       --model ${MODEL_A}
       --served-model-name ${MODEL_NAME_A}
@@ -65,7 +65,7 @@ services:
       - ./.cache/vllm:/root/.cache/vllm
     ports:
       - "8002:8000"  # vLLM API
-      - "9002:9000"  # Checkpoint-Service
+      - "9002:9000"  # Checkpoint Service
     command: >
       --model ${MODEL_B}
       --served-model-name ${MODEL_NAME_B}
@@ -87,7 +87,7 @@ services:
       context: ./controller
     image: vllm-controller:latest
     container_name: vllm-controller
-    runtime: nvidia          # wichtig für nvidia-smi im Controller
+    runtime: nvidia          # important for nvidia-smi in the controller
     deploy:
       resources:
         reservations:

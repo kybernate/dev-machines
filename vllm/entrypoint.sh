@@ -5,7 +5,7 @@ set -euo pipefail
 
 echo "[entrypoint] Starting vLLM server with args: $*"
 
-# WICHTIG: python3 statt python
+# IMPORTANT: python3 instead of python
 python3 -m vllm.entrypoints.openai.api_server "$@" &
 VLLM_PID=$!
 echo "${VLLM_PID}" > /tmp/vllm.pid

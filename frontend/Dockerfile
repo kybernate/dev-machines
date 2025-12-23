@@ -1,6 +1,6 @@
 FROM nginx:alpine
 
-# Optional: kleinere nginx-Konfiguration könnte hier ergänzt werden
+# Optional: smaller nginx configuration could be added here
 COPY index.html /usr/share/nginx/html/index.html
 
 EXPOSE 80

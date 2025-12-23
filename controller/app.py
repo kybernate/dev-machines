@@ -21,29 +21,29 @@ app = FastAPI(
     title="vLLM Multi-Model Controller",
     version="0.3.0",
     description=(
-        "OpenAI-kompatibler Proxy mit Window-basiertem Scheduling über mehrere "
-        "vLLM-Backends, autodiscovery via /v1/models, inkl. Streaming."
+        "OpenAI-compatible proxy with window-based scheduling across multiple "
+        "vLLM backends, autodiscovery via /v1/models, including streaming."
     ),
 )
 
-# CORS für das Frontend (z.B. http://localhost:3000)
+# CORS for the frontend (e.g., http://localhost:3000)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # für dev ok; später ggf. einschränken
+    allow_origins=["*"],   # ok for dev; restrict later if needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -----------------------------------------------------------------------------
-# Konfiguration
+# Configuration
 # -----------------------------------------------------------------------------
 
-# Liste der Backend-Container, kommasepariert:
+# List of backend containers, comma-separated:
 #   BACKEND_CONTAINERS="vllm-model-a,vllm-model-b"
 BACKEND_CONTAINERS = os.getenv("BACKEND_CONTAINERS", "vllm-model-a,vllm-model-b")
 
-# Window-Parameter
+# Window parameters
 MAX_REQUESTS_PER_WINDOW = int(os.getenv("MAX_REQUESTS_PER_WINDOW", "8"))
 MAX_WINDOW_DURATION_MS = int(os.getenv("MAX_WINDOW_DURATION_MS", "500"))
 IDLE_SLEEP_MS = int(os.getenv("IDLE_SLEEP_MS", "20"))
@@ -57,19 +57,19 @@ class BackendConfig:
     models: Set[str] = field(default_factory=set)
 
 
-# Backends werden beim Startup autodiscovered
+# Backends are autodiscovered at startup
 backends: Dict[str, BackendConfig] = {}
 
-# Map von Model-ID → Backend-Key
+# Map from Model-ID → Backend-Key
 model_alias_to_backend: Dict[str, str] = {}
 
-# Pro Backend eine Queue
+# One queue per backend
 queues: Dict[str, "asyncio.Queue[QueuedRequest]"] = {}
 
-# Globaler HTTP-Client
+# Global HTTP client
 client: Optional[httpx.AsyncClient] = None
 
-# Welches Backend ist aktuell aktiv?
+# Which backend is currently active?
 active_backend: Optional[str] = None
 
 scheduler_started = False
@@ -79,53 +79,53 @@ scheduler_started = False
 class QueuedRequest:
     backend_key: str
     body: Dict[str, Any]
-    future: Optional[asyncio.Future]  # für non-stream
+    future: Optional[asyncio.Future]  # for non-stream
     is_stream: bool = False
     stream_queue: Optional["asyncio.Queue[Optional[bytes]]"] = None
 
 
 # -----------------------------------------------------------------------------
-# Pydantic-Modelle für OpenAPI-Doku
+# Pydantic models for OpenAPI documentation
 # -----------------------------------------------------------------------------
 
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant"] = Field(
-        ..., description="Rolle des Messages im Chat."
+        ..., description="Role of the message in the chat."
     )
-    content: str = Field(..., description="Inhalt der Nachricht.")
+    content: str = Field(..., description="Content of the message.")
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = Field(..., description="Model-ID, wie sie /v1/models meldet.")
+    model: str = Field(..., description="Model ID as reported by /v1/models.")
     messages: List[ChatMessage] = Field(
-        ..., description="Konversation in Form einer Liste von Messages."
+        ..., description="Conversation as a list of messages."
     )
     stream: Optional[bool] = Field(
         False,
-        description="Wenn true, wird eine Streaming-Antwort im OpenAI-Format erwartet.",
+        description="If true, a streaming response in OpenAI format is expected.",
     )
     temperature: Optional[float] = Field(
-        0.7, description="Sampling-Temperatur."
+        0.7, description="Sampling-Temperature."
     )
     max_tokens: Optional[int] = Field(
-        None, description="Maximalzahl an Tokens in der Antwort."
+        None, description="Maximum number of tokens in the response."
     )
 
 
 class CompletionRequest(BaseModel):
-    model: str = Field(..., description="Model-ID, wie sie /v1/models meldet.")
-    prompt: str = Field(..., description="Prompt-Text.")
+    model: str = Field(..., description="Model ID as reported by /v1/models.")
+    prompt: str = Field(..., description="Prompt text.")
     stream: Optional[bool] = Field(
         False,
-        description="Wenn true, wird eine Streaming-Antwort im OpenAI-Format erwartet.",
+        description="If true, a streaming response in OpenAI format is expected.",
     )
     temperature: Optional[float] = Field(0.7)
     max_tokens: Optional[int] = Field(None)
 
 
 class EmbeddingsRequest(BaseModel):
-    model: str = Field(..., description="Embedding-Modell-ID.")
-    input: List[str] = Field(..., description="Liste von Texten, die eingebettet werden sollen.")
+    model: str = Field(..., description="Embedding model ID.")
+    input: List[str] = Field(..., description="List of texts to be embedded.")
 
 
 class ChatCompletionChoiceMock(BaseModel):
@@ -166,7 +166,7 @@ class EmbeddingsResponseMock(BaseModel):
 
 
 # -----------------------------------------------------------------------------
-# Hilfsfunktionen
+# Helper functions
 # -----------------------------------------------------------------------------
 
 def parse_backend_containers() -> List[str]:
@@ -178,7 +178,7 @@ def parse_backend_containers() -> List[str]:
 
 async def fetch_models_from_backend(cfg: BackendConfig) -> List[str]:
     """
-    Holt die Liste der Modelle von einem Backend via /v1/models.
+    Fetches the list of models from a backend via /v1/models.
     """
     url = f"{cfg.vllm_base_url}/v1/models"
     try:
@@ -198,8 +198,8 @@ async def fetch_models_from_backend(cfg: BackendConfig) -> List[str]:
 
 async def discover_backends():
     """
-    Baut die Backend-Liste dynamisch anhand der Container-Liste,
-    ruft bei jedem Backend /v1/models ab und erstellt:
+    Dynamically builds the backend list based on the container list,
+    fetches /v1/models from each backend and creates:
       - backends[name]
       - queues[name]
       - model_alias_to_backend
@@ -246,8 +246,8 @@ def resolve_backend_key(requested_model: str) -> Optional[str]:
 def pick_next_backend() -> Optional[str]:
     """
     Simple Policy:
-      - wenn active_backend pending hat -> bleib dabei
-      - sonst: erstes Backend mit nicht-leerer Queue
+      - if active_backend has pending requests -> stay with it
+      - otherwise: first backend with non-empty queue
     """
     global active_backend
     if active_backend and active_backend in queues and not queues[active_backend].empty():
@@ -261,7 +261,7 @@ def pick_next_backend() -> Optional[str]:
 
 async def call_checkpoint_api(backend_key: str, action: str) -> Dict[str, Any]:
     """
-    Ruft /checkpoint/dump oder /checkpoint/restore auf dem Checkpoint-Service eines Backends auf.
+    Calls /checkpoint/dump or /checkpoint/restore on the checkpoint service of a backend.
     """
     assert action in ("dump", "restore"), "invalid checkpoint action"
     cfg = backends[backend_key]
@@ -296,9 +296,9 @@ async def ensure_backend_suspended(backend_key: str) -> None:
 
 async def process_backend_request(backend_key: str, qreq: QueuedRequest, endpoint: str) -> None:
     """
-    Führt den HTTP-Call an das vLLM-Backend durch:
-      - für non-stream: komplette JSON-Antwort
-      - für stream: chunked Streaming via stream_queue
+    Performs the HTTP call to the vLLM backend:
+      - for non-stream: complete JSON response
+      - for stream: chunked streaming via stream_queue
     """
     cfg = backends[backend_key]
 
@@ -309,7 +309,7 @@ async def process_backend_request(backend_key: str, qreq: QueuedRequest, endpoin
     elif endpoint == "embeddings":
         url = f"{cfg.vllm_base_url}/v1/embeddings"
     else:
-        # sollte nicht passieren
+        # should not happen
         err = HTTPException(status_code=500, detail="Unknown endpoint type")
         if qreq.future and not qreq.future.done():
             qreq.future.set_exception(err)
@@ -317,20 +317,20 @@ async def process_backend_request(backend_key: str, qreq: QueuedRequest, endpoin
 
     is_stream = bool(qreq.is_stream)
 
-    # Embeddings streamen typischerweise nicht, wir behandeln sie immer non-stream
+    # Embeddings typically do not stream, we always handle them as non-stream
     if endpoint == "embeddings":
         is_stream = False
 
     try:
         if not is_stream:
-            # Non-Streaming: gewohntes JSON-Proxy
+            # Non-Streaming: usual JSON proxy
             resp = await client.post(url, json=qreq.body, timeout=None)
             resp.raise_for_status()
             data = resp.json()
             if qreq.future and not qreq.future.done():
                 qreq.future.set_result(data)
         else:
-            # Streaming: wir streamen die Bytes 1:1 durch
+            # Streaming: we stream the bytes 1:1 through
             if qreq.stream_queue is None:
                 logger.error("stream_queue missing for streaming request")
                 if qreq.future and not qreq.future.done():
@@ -342,7 +342,7 @@ async def process_backend_request(backend_key: str, qreq: QueuedRequest, endpoin
             async with client.stream("POST", url, json=qreq.body, timeout=None) as resp:
                 resp.raise_for_status()
                 async for chunk in resp.aiter_bytes():
-                    # chunk unverändert an den Client weiterreichen
+                    # pass chunk unchanged to the client
                     await qreq.stream_queue.put(chunk)
 
             # Ende markieren
@@ -351,7 +351,7 @@ async def process_backend_request(backend_key: str, qreq: QueuedRequest, endpoin
     except httpx.HTTPStatusError as e:
         logger.error("Backend %s returned HTTP error: %s", backend_key, e)
         if is_stream and qreq.stream_queue is not None:
-            # Fehler als JSON-Chunk streamen und beenden
+            # Stream error as JSON chunk and end
             error_json = (
                 f'data: {{"error": "Backend {backend_key} HTTP {e.response.status_code}"}}\n\n'
             ).encode("utf-8")
@@ -399,7 +399,7 @@ async def process_backend_request(backend_key: str, qreq: QueuedRequest, endpoin
 
 
 # -----------------------------------------------------------------------------
-# Scheduler-Loop (Window-basiert)
+# Scheduler-Loop (Window-based)
 # -----------------------------------------------------------------------------
 
 async def scheduler_loop():
@@ -423,11 +423,11 @@ async def scheduler_loop():
                 continue
 
             if active_backend != backend_to_serve:
-                # altes Backend suspenden
+                # suspend old backend
                 if active_backend is not None and active_backend in backends:
                     logger.info("Suspending backend %s", active_backend)
                     await ensure_backend_suspended(active_backend)
-                # neues Backend restoren
+                # restore new backend
                 logger.info("Restoring backend %s", backend_to_serve)
                 await ensure_backend_running(backend_to_serve)
                 active_backend = backend_to_serve
@@ -437,14 +437,14 @@ async def scheduler_loop():
             served = 0
             q = queues[backend_to_serve]
 
-            # Window für dieses Backend
+            # Window for this backend
             while True:
                 elapsed_ms = (time.monotonic() - start) * 1000.0
                 if served >= MAX_REQUESTS_PER_WINDOW or elapsed_ms >= MAX_WINDOW_DURATION_MS:
                     break
 
                 try:
-                    # Wir packen den Endpunkt-Typ in qreq.body["_endpoint_type"]
+                    # We pack the endpoint type into qreq.body["_endpoint_type"]
                     qreq: QueuedRequest = q.get_nowait()
                 except asyncio.QueueEmpty:
                     break
@@ -496,11 +496,11 @@ async def healthz():
 @app.get("/status")
 async def controller_status():
     """
-    Liefert:
-      - aktives Backend
-      - pro Backend Queue-Größe
-      - Checkpoint-Status aus /status des Checkpoint-Services
-      - daraus abgeleiteten Modellstatus
+    Provides:
+      - active backend
+      - queue size per backend
+      - checkpoint status from /status of the checkpoint service
+      - derived model status
     """
     backend_status: Dict[str, Any] = {}
 
@@ -531,7 +531,7 @@ async def controller_status():
             if cuda_state == "running":
                 mstate = "ACTIVE"
             elif cuda_state == "checkpointed":
-                # sollte selten passieren, dann bug
+                # should rarely happen, then bug
                 mstate = "INCONSISTENT"
             else:
                 mstate = "UNKNOWN"
@@ -557,8 +557,8 @@ async def controller_status():
 
 def get_gpu_memory_summary() -> Dict[str, int]:
     """
-    Liest mit nvidia-smi die VRAM-Auslastung über alle sichtbaren GPUs.
-    Erwartet, dass der Controller-Container GPU-Zugriff hat (runtime: nvidia).
+    Reads VRAM usage across all visible GPUs using nvidia-smi.
+    Expects the controller container to have GPU access (runtime: nvidia).
     """
     total_mb = 0
     used_mb = 0
@@ -588,7 +588,7 @@ def get_gpu_memory_summary() -> Dict[str, int]:
 
 def get_ram_summary() -> Dict[str, int]:
     """
-    Gesamter RAM vs. genutzt (aus Sicht des Hosts, soweit psutil im Container sieht).
+    Total RAM vs. used (from the host's perspective, as far as psutil sees in the container).
     """
     vm = psutil.virtual_memory()
     total_mb = int(vm.total / (1024 * 1024))
@@ -599,7 +599,7 @@ def get_ram_summary() -> Dict[str, int]:
 @app.get("/metrics/resources")
 async def metrics_resources():
     """
-    Liefert aggregierte VRAM- und RAM-Metriken für das Dashboard.
+    Provides aggregated VRAM and RAM metrics for the dashboard.
     """
     gpu = get_gpu_memory_summary()
     ram = get_ram_summary()
@@ -616,8 +616,8 @@ async def metrics_resources():
 @app.get("/v1/models")
 async def list_models():
     """
-    Aggregiert alle Modelle aus allen Backends.
-    Die IDs sind exakt die, die vLLM in /v1/models meldet.
+    Aggregates all models from all backends.
+    The IDs are exactly those reported by vLLM in /v1/models.
     """
     models: List[Dict[str, Any]] = []
     for mid, backend_key in model_alias_to_backend.items():
@@ -646,12 +646,12 @@ async def get_model(model_id: str):
 @app.post(
     "/v1/chat/completions",
     response_model=ChatCompletionResponseMock,
-    responses={200: {"description": "Chat completion oder Streaming-Response"}},
+    responses={200: {"description": "Chat completion or streaming response"}},
 )
 async def chat_completions(body: ChatCompletionRequest, request: Request):
     """
-    OpenAI-kompatibler Chat-Completion-Endpoint.
-    Unterstützt stream=true (Server-Sent Events wie OpenAI/vLLM).
+    OpenAI-compatible chat completion endpoint.
+    Supports stream=true (Server-Sent Events like OpenAI/vLLM).
     """
     requested_model = body.model
     backend_key = resolve_backend_key(requested_model)
@@ -667,7 +667,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
     is_stream = bool(body.stream)
 
     if not is_stream:
-        # Non-Streaming Pfad mit Future
+        # Non-streaming path with Future
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
         payload = body.model_dump()
@@ -692,7 +692,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
                 status_code=500, detail="Controller failed to process request"
             )
 
-    # Streaming-Pfad
+    # Streaming path
     stream_queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
     payload = body.model_dump()
     payload["_endpoint_type"] = "chat"
@@ -711,7 +711,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
                 chunk = await stream_queue.get()
                 if chunk is None:
                     break
-                # chunk ist bereits das, was vLLM generiert (SSE-Format)
+                # chunk is already what vLLM generates (SSE format)
                 yield chunk
         except Exception as e:
             logger.exception("Error in streaming generator: %s", e)
@@ -722,12 +722,12 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
 @app.post(
     "/v1/completions",
     response_model=CompletionResponseMock,
-    responses={200: {"description": "Legacy completion oder Streaming-Response"}},
+    responses={200: {"description": "Legacy completion or streaming response"}},
 )
 async def completions(body: CompletionRequest, request: Request):
     """
-    OpenAI-kompatibler /v1/completions Endpunkt.
-    Wird 1:1 an das Backend durchgereicht.
+    OpenAI-compatible /v1/completions endpoint.
+    Passed 1:1 to the backend.
     """
     requested_model = body.model
     backend_key = resolve_backend_key(requested_model)
@@ -767,7 +767,7 @@ async def completions(body: CompletionRequest, request: Request):
                 status_code=500, detail="Controller failed to process request"
             )
 
-    # Streaming-Pfad
+    # Streaming path
     stream_queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
     payload = body.model_dump()
     payload["_endpoint_type"] = "completions"
@@ -796,12 +796,12 @@ async def completions(body: CompletionRequest, request: Request):
 @app.post(
     "/v1/embeddings",
     response_model=EmbeddingsResponseMock,
-    responses={200: {"description": "Embedding-Antwort (non-stream)"}},
+    responses={200: {"description": "Embedding response (non-stream)"}},
 )
 async def embeddings(body: EmbeddingsRequest, request: Request):
     """
-    OpenAI-kompatibler /v1/embeddings Endpoint.
-    Wird direkt als JSON-Antwort proxied (kein Streaming).
+    OpenAI-compatible /v1/embeddings endpoint.
+    Proxied directly as JSON response (no streaming).
     """
     requested_model = body.model
     backend_key = resolve_backend_key(requested_model)

@@ -1,19 +1,19 @@
 # vllm/Dockerfile
 
-# vLLM-Version beim Build steuerbar
+# vLLM version controllable at build time
 ARG VLLM_VERSION=v0.10.2
 FROM vllm/vllm-openai:${VLLM_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
 
-# Tools zum Bauen von cuda-checkpoint
+# Tools for building cuda-checkpoint
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git build-essential \
     curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# cuda-checkpoint bauen und installieren
+# Build and install cuda-checkpoint
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint \
     && cd /tmp/cuda-checkpoint \
     && cp bin/x86_64_Linux/cuda-checkpoint /usr/local/bin/ \
@@ -22,11 +22,11 @@ RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
 WORKDIR /app
 
-# Python-Dependencies für den Checkpoint-Service
+# Python dependencies for the checkpoint service
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Checkpoint-Service + Entrypoint
+# Checkpoint service + entrypoint
 COPY checkpoint_service.py /app/checkpoint_service.py
 COPY entrypoint.sh /app/entrypoint.sh
 
