@@ -90,6 +90,19 @@ Each config includes tuned settings and can be customized by editing the uncomme
 
 3. **Environment Variables** (in [`docker-compose.yml`](docker-compose.yml )):
    - `VLLM_VERSION`: vLLM version (default: v0.10.2).
+   - Model-specific settings for Model A:
+     - `VLLM_USE_V1_A`: Whether to use vLLM API v1 for Model A (0 for v0, 1 for v1).
+     - `QUANTIZATION_A`: Quantization method for Model A (default: awq).
+     - `DTYPE_A`: Data type for Model A (default: half).
+     - `MAX_MODEL_LEN_A`: Maximum sequence length for Model A (default: 8192).
+     - `EXTRA_ARGS_A`: Additional vLLM arguments for Model A (optional, e.g., "--trust-remote-code").
+   - Model-specific settings for Model B:
+     - `VLLM_USE_V1_B`: Whether to use vLLM API v1 for Model B (0 for v0, 1 for v1).
+     - `QUANTIZATION_B`: Quantization method for Model B (default: awq).
+     - `DTYPE_B`: Data type for Model B (default: half).
+     - `MAX_MODEL_LEN_B`: Maximum sequence length for Model B (default: 8192).
+     - `EXTRA_ARGS_B`: Additional vLLM arguments for Model B (optional).
+   - `GPU_MEM_UTIL`: GPU memory utilization ratio (0.0-1.0).
    - [`BACKEND_CONTAINERS`](controller/app.py ): Comma-separated list of backend names.
    - [`MAX_REQUESTS_PER_WINDOW`](controller/app.py ), [`MAX_WINDOW_DURATION_MS`](controller/app.py ), [`IDLE_SLEEP_MS`](controller/app.py ): Scheduling params.
 

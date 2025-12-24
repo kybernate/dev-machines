@@ -18,7 +18,7 @@ services:
               capabilities: [gpu]
     ipc: host
     environment:
-      - VLLM_USE_V1=0
+      - VLLM_USE_V1=${VLLM_USE_V1_A:-0}
       - CHECKPOINT_SERVICE_PORT=9000
     volumes:
       - ./.cache/models:/root/.cache/huggingface
@@ -29,9 +29,10 @@ services:
     command: >
       --model ${MODEL_A}
       --served-model-name ${MODEL_NAME_A}
-      --quantization awq
-      --dtype half
-      --max-model-len 8192
+      --quantization ${QUANTIZATION_A:-awq}
+      --dtype ${DTYPE_A:-half}
+      --max-model-len ${MAX_MODEL_LEN_A:-8192}
+      ${EXTRA_ARGS_A}
       --gpu-memory-utilization ${GPU_MEM_UTIL}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/ready"]
@@ -58,7 +59,7 @@ services:
               capabilities: [gpu]
     ipc: host
     environment:
-      - VLLM_USE_V1=0
+      - VLLM_USE_V1=${VLLM_USE_V1_B:-0}
       - CHECKPOINT_SERVICE_PORT=9000
     volumes:
       - ./.cache/models:/root/.cache/huggingface
@@ -69,9 +70,10 @@ services:
     command: >
       --model ${MODEL_B}
       --served-model-name ${MODEL_NAME_B}
-      --quantization awq
-      --dtype half
-      --max-model-len 8192
+      --quantization ${QUANTIZATION_B:-awq}
+      --dtype ${DTYPE_B:-half}
+      --max-model-len ${MAX_MODEL_LEN_B:-8192}
+      ${EXTRA_ARGS_B}
       --gpu-memory-utilization ${GPU_MEM_UTIL}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/ready"]
