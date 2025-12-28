@@ -5,6 +5,7 @@ from typing import Optional, List
 import subprocess
 import os
 import httpx
+import time
 
 app = FastAPI(
     title="vLLM Checkpoint Service",
@@ -18,6 +19,7 @@ VLLM_API_URL = os.getenv("VLLM_API_URL", "http://127.0.0.1:8000")
 class StatusResponse(BaseModel):
     state: str
     cuda_states: dict
+    cuda_state: Optional[str] = None
     has_toggled_once: bool
     initialized: bool
     active_pids: List[int]
@@ -29,6 +31,7 @@ class ServiceState:
 
 service_state = ServiceState()
 GPU_PIDS: List[int] = []
+LAST_CUDA_PIDS: List[int] = []
 
 # --- PID & GPU Detection -----------------------------------------------------
 
@@ -46,23 +49,121 @@ def process_uses_gpu(pid: int) -> bool:
     """Prüft, ob der Prozess NVIDIA-Devices offen hat."""
     try:
         fd_dir = Path(f"/proc/{pid}/fd")
+        if not fd_dir.exists():
+            return False
         for fd in fd_dir.iterdir():
-            if "/dev/nvidia" in os.readlink(fd): return True
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.startswith("/dev/nvidia"):
+                return True
     except: pass
     return False
 
 def find_all_vllm_pids() -> List[int]:
-    """Findet alle Prozesse im selben Container-Context."""
+    """Findet vLLM-Prozesse in diesem Container via Prozess-Baum.
+
+    Wichtig: In Docker ist /proc typischerweise bereits auf den Container-PID-NS
+    beschränkt. Ein strikter Vergleich der kompletten cgroup-Datei ist für
+    Tensor-Parallel oft zu fragil (Sub-cgroups), daher nutzen wir PPID/Child-Tree.
+    """
     try:
         main_pid = get_main_pid()
-        main_cgroup = read_cgroup(main_pid)
-        pids = [main_pid]
-        for entry in os.listdir("/proc"):
-            if entry.isdigit() and int(entry) != main_pid:
-                if read_cgroup(int(entry)) == main_cgroup:
-                    pids.append(int(entry))
-        return sorted(pids)
-    except: return []
+    except Exception:
+        return []
+
+    def get_ppid(pid: int) -> Optional[int]:
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            # Format: pid (comm) state ppid ...
+            after_comm = stat.rsplit(")", 1)[1].strip()
+            parts = after_comm.split()
+            return int(parts[1])  # state is parts[0], ppid is parts[1]
+        except Exception:
+            return None
+
+    # Build PPID -> children mapping for all visible processes
+    children: dict[int, List[int]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        ppid = get_ppid(pid)
+        if ppid is None:
+            continue
+        children.setdefault(ppid, []).append(pid)
+
+    # BFS from main_pid
+    seen: set[int] = set()
+    queue: List[int] = [main_pid]
+    while queue:
+        pid = queue.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        queue.extend(children.get(pid, []))
+
+    return sorted(seen)
+
+
+def _nvidia_smi_compute_pids() -> List[int]:
+    """Liest aktive Compute PIDs aus nvidia-smi.
+
+    Rückgabewert ist leer, wenn nvidia-smi nicht verfügbar ist oder nichts läuft.
+    """
+    try:
+        res = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if res.returncode != 0:
+            return []
+        pids: List[int] = []
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pids.append(int(line))
+            except ValueError:
+                continue
+        return sorted(set(pids))
+    except Exception:
+        return []
+
+
+def find_vllm_gpu_pids() -> List[int]:
+    """Findet die GPU-Workload-PIDs von vLLM.
+
+    Für Tensor-Parallel gibt es mehrere Worker-Prozesse. Wir nehmen die vLLM
+    Prozess-Tree-PIDs und schneiden sie optional mit den PIDs aus nvidia-smi.
+    """
+    vllm_tree_pids = set(find_all_vllm_pids())
+    if not vllm_tree_pids:
+        return []
+
+    compute_pids = set(_nvidia_smi_compute_pids())
+    if compute_pids:
+        # Achtung: In Standard-Docker-Setups zeigt nvidia-smi oft Host-PIDs,
+        # während /proc Container-PIDs zeigt. Dann ist die Schnittmenge leer.
+        intersected = sorted(vllm_tree_pids.intersection(compute_pids))
+        if intersected:
+            gpu_pids = intersected
+        else:
+            # Fallback: /proc fd scan (unabhängig von PID-Namespaces)
+            gpu_pids = sorted([pid for pid in vllm_tree_pids if process_uses_gpu(pid)])
+    else:
+        # Fallback: /proc fd scan (langsamer, aber unabhängig von nvidia-smi)
+        gpu_pids = sorted([pid for pid in vllm_tree_pids if process_uses_gpu(pid)])
+
+    return gpu_pids
 
 # --- CUDA Checkpoint Logic ---------------------------------------------------
 
@@ -78,39 +179,116 @@ def get_cuda_states(pids: List[int]) -> dict:
             if res.returncode == 0:
                 states[pid] = res.stdout.strip().lower()
             else:
-                # API-Server liefert hier oft Fehler, da kein CUDA-Context
-                states[pid] = "non-cuda"
+                # Kann Non-CUDA sein, aber auch Rechte/Tool/Timing-Probleme.
+                # Nicht als Erfolg werten.
+                states[pid] = "unknown"
         except:
             states[pid] = "error"
     return states
+
+
+def find_vllm_cuda_pids() -> List[int]:
+    """Find vLLM worker PIDs that cuda-checkpoint can control.
+
+    Important: After checkpointing, processes may no longer have /dev/nvidia*
+    file descriptors, so /proc fd-based detection can go empty even though
+    cuda-checkpoint can still get/toggle state.
+    """
+    global LAST_CUDA_PIDS
+
+    candidates = find_all_vllm_pids()
+    if not candidates:
+        return []
+
+    states = get_cuda_states(candidates)
+    cuda_pids = [pid for pid, st in states.items() if st in ["running", "checkpointed"]]
+
+    if cuda_pids:
+        LAST_CUDA_PIDS = sorted(cuda_pids)
+        return LAST_CUDA_PIDS
+
+    # Fallback: if we previously found CUDA PIDs, keep using them.
+    # (Useful if the process tree is stable but state probing is momentarily flaky.)
+    return list(LAST_CUDA_PIDS)
 
 def toggle_cuda_processes(target_state: str):
     """
     Toggelt alle Prozesse, die tatsächlich CUDA nutzen.
     target_state: 'suspend' (wird zu checkpointed) oder 'resume' (wird zu running)
     """
-    pids = find_all_vllm_pids()
+    # Wichtig: Wir wollen wirklich die CUDA-kontrollierbaren Worker togglen.
+    pids = find_vllm_cuda_pids()
+    if not pids:
+        print("[checkpoint] No vLLM CUDA PIDs found; refusing to report success.")
+        return False
+
     states = get_cuda_states(pids)
-    
-    # Filter: Nur PIDs, die NICHT 'non-cuda' sind
-    cuda_pids = [pid for pid, st in states.items() if st not in ["non-cuda", "error"]]
-    
-    print(f"[checkpoint] Target: {target_state}. Action on PIDs: {cuda_pids}")
-    
-    results = []
-    for pid in cuda_pids:
-        current_st = states[pid]
-        # Nur toggeln, wenn nicht schon im Zielzustand
-        if (target_state == "suspend" and current_st == "running") or \
-           (target_state == "resume" and current_st == "checkpointed"):
-            try:
-                subprocess.run(["cuda-checkpoint", "--toggle", "--pid", str(pid)], check=True)
-                results.append(True)
-            except Exception as e:
-                print(f"[checkpoint] Failed to toggle PID {pid}: {e}")
-                results.append(False)
-    
-    return all(results) if results else True
+
+    desired = "checkpointed" if target_state == "suspend" else "running"
+    toggled_any = False
+    ok = True
+
+    print(f"[checkpoint] Target: {target_state}. GPU PIDs: {pids}. States: {states}")
+
+    for pid in pids:
+        current = states.get(pid, "unknown")
+        if current == desired:
+            continue
+
+        try:
+            subprocess.run(["cuda-checkpoint", "--toggle", "--pid", str(pid)], check=True)
+            toggled_any = True
+        except Exception as e:
+            print(f"[checkpoint] Failed to toggle PID {pid}: {e}")
+            ok = False
+            continue
+
+        # Verifikation: state muss sich in Richtung desired bewegen.
+        verified = False
+        for _ in range(5):
+            time.sleep(0.2)
+            new_state = get_cuda_states([pid]).get(pid, "unknown")
+            if new_state == desired:
+                verified = True
+                break
+        if not verified:
+            print(f"[checkpoint] PID {pid} did not reach desired state '{desired}'.")
+            ok = False
+
+    # Wenn wir hier nichts togglen mussten (weil schon in desired), ist das ok.
+    # Aber "gar keine PIDs" ist oben bereits ein Fehler.
+    return ok and (toggled_any or all(st == desired for st in states.values()))
+
+
+def _logical_from_cuda_states(states: dict) -> str:
+    worker_states = [s for s in states.values() if s not in ["unknown", "error"]]
+    if "running" in worker_states:
+        return "RUNNING"
+    if "checkpointed" in worker_states:
+        return "SUSPENDED"
+    return "INIT"
+
+
+def _aggregate_cuda_state(states: dict) -> str:
+    """Backwards-compatible single cuda_state string.
+
+    The controller/UI expects a single string: "running" or "checkpointed".
+    For multi-process setups we collapse as:
+      - if any running => running
+      - else if any checkpointed => checkpointed
+      - else => unknown
+    """
+    vals = [str(v).lower() for v in states.values()]
+    if any(v == "running" for v in vals):
+        return "running"
+    if any(v == "checkpointed" for v in vals):
+        return "checkpointed"
+    return "unknown"
+
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
 
 # --- API Endpoints -----------------------------------------------------------
 
@@ -124,51 +302,163 @@ async def ready():
     except:
         raise HTTPException(status_code=503, detail="vLLM not ready")
 
+    # Original semantics: once initialized successfully, /ready should stay 200
+    # even if we cannot currently probe cuda-checkpoint state.
     pids = find_all_vllm_pids()
-    states = get_cuda_states(pids)
-    
-    if not service_state.initialized:
-        service_state.initialized = True
-        service_state.state = "RUNNING"
-        print(f"[ready] vLLM detected with PIDs {pids}. CUDA processes: {[p for p, s in states.items() if s != 'non-cuda']}")
+    cuda_pids = find_vllm_cuda_pids()
+    states = get_cuda_states(cuda_pids) if cuda_pids else {}
 
-    return {"status": "ready", "pids": states}
+    if service_state.initialized:
+        cuda_state = _aggregate_cuda_state(states)
+        return {
+            "ready": True,
+            "status": "ready",
+            "state": service_state.state,
+            "cuda_state": cuda_state,
+            "has_toggled_once": service_state.has_toggled_once,
+            "initialized": service_state.initialized,
+            "vllm_tree_pids": pids,
+            "cuda_pids": cuda_pids,
+            "cuda_states": states,
+        }
+
+    if not cuda_pids:
+        raise HTTPException(status_code=503, detail="CUDA workload PIDs not detected yet")
+
+    if not any(st in ["running", "checkpointed"] for st in states.values()):
+        raise HTTPException(status_code=503, detail="cuda-checkpoint state not available yet")
+
+    # Original behavior (v0.1.0): after the first successful initialization,
+    # do an initial toggle when the workload is RUNNING, to create a base
+    # checkpoint and end up in SUSPENDED.
+    if not service_state.initialized:
+        logical = _logical_from_cuda_states(states)
+        print(f"[ready] First init. vLLM tree PIDs {pids}. CUDA PIDs {cuda_pids}. States: {states}. logical={logical}")
+
+        if logical == "RUNNING":
+            print("[ready] Initial base checkpoint: toggling CUDA state once")
+            success = toggle_cuda_processes("suspend")
+            service_state.has_toggled_once = bool(success)
+            # refresh states after toggle
+            states = get_cuda_states(find_vllm_cuda_pids())
+            logical = _logical_from_cuda_states(states)
+        else:
+            service_state.has_toggled_once = (logical == "SUSPENDED")
+
+        service_state.state = logical
+        service_state.initialized = True
+        print(f"[ready] Initialization complete. state={service_state.state}")
+
+    cuda_state = _aggregate_cuda_state(states)
+
+    return {
+        "ready": True,
+        "status": "ready",
+        "state": service_state.state,
+        "cuda_state": cuda_state,
+        "has_toggled_once": service_state.has_toggled_once,
+        "initialized": service_state.initialized,
+        "vllm_tree_pids": pids,
+        "cuda_pids": cuda_pids,
+        "cuda_states": states,
+    }
 
 @app.get("/status", response_model=StatusResponse)
 async def status():
     pids = find_all_vllm_pids()
-    states = get_cuda_states(pids)
-    
+    cuda_pids = find_vllm_cuda_pids()
+    states = get_cuda_states(cuda_pids) if cuda_pids else {}
+
     # Bestimme globalen Status anhand der Worker
-    worker_states = [s for s in states.values() if s != "non-cuda"]
-    if "running" in worker_states: logical = "RUNNING"
-    elif "checkpointed" in worker_states: logical = "SUSPENDED"
-    else: logical = "INIT"
+    logical = _logical_from_cuda_states(states)
+    cuda_state = _aggregate_cuda_state(states)
 
     return StatusResponse(
         state=logical,
         cuda_states=states,
+        cuda_state=cuda_state,
         has_toggled_once=service_state.has_toggled_once,
         initialized=service_state.initialized,
-        active_pids=pids
+        active_pids=cuda_pids
     )
 
 @app.post("/checkpoint/dump")
 async def dump():
+    # Backwards-compatible response expected by controller:
+    # {status, toggled, state, cuda_state}
+    cuda_pids = find_vllm_cuda_pids()
+    if not cuda_pids:
+        raise HTTPException(status_code=503, detail="No CUDA PIDs found")
+    before = get_cuda_states(cuda_pids)
+    before_cuda_state = _aggregate_cuda_state(before)
+
+    if before_cuda_state == "checkpointed":
+        service_state.state = "SUSPENDED"
+        return {
+            "status": "ok",
+            "toggled": False,
+            "state": service_state.state,
+            "cuda_state": before_cuda_state,
+            "cuda_states": before,
+            "active_pids": cuda_pids,
+        }
+
     success = toggle_cuda_processes("suspend")
-    if success:
+    after_pids = find_vllm_cuda_pids()
+    after = get_cuda_states(after_pids) if after_pids else {}
+    after_cuda_state = _aggregate_cuda_state(after)
+
+    if success and after_cuda_state == "checkpointed":
         service_state.state = "SUSPENDED"
         service_state.has_toggled_once = True
-        return {"message": "GPU state suspended (checkpointed)"}
-    raise HTTPException(status_code=500, detail="Failed to suspend some GPU processes")
+        return {
+            "status": "ok",
+            "toggled": True,
+            "state": service_state.state,
+            "cuda_state": after_cuda_state,
+            "cuda_states": after,
+            "active_pids": after_pids,
+        }
+
+    raise HTTPException(status_code=500, detail="Failed to suspend CUDA processes")
 
 @app.post("/checkpoint/restore")
 async def restore():
-    success = toggle_cuda_processes("resume")
-    if success:
+    cuda_pids = find_vllm_cuda_pids()
+    if not cuda_pids:
+        raise HTTPException(status_code=503, detail="No CUDA PIDs found")
+    before = get_cuda_states(cuda_pids)
+    before_cuda_state = _aggregate_cuda_state(before)
+
+    if before_cuda_state == "running":
         service_state.state = "RUNNING"
-        return {"message": "GPU state resumed (running)"}
-    raise HTTPException(status_code=500, detail="Failed to resume some GPU processes")
+        return {
+            "status": "ok",
+            "toggled": False,
+            "state": service_state.state,
+            "cuda_state": before_cuda_state,
+            "cuda_states": before,
+            "active_pids": cuda_pids,
+        }
+
+    success = toggle_cuda_processes("resume")
+    after_pids = find_vllm_cuda_pids()
+    after = get_cuda_states(after_pids) if after_pids else {}
+    after_cuda_state = _aggregate_cuda_state(after)
+
+    if success and after_cuda_state == "running":
+        service_state.state = "RUNNING"
+        service_state.has_toggled_once = True
+        return {
+            "status": "ok",
+            "toggled": True,
+            "state": service_state.state,
+            "cuda_state": after_cuda_state,
+            "cuda_states": after,
+            "active_pids": after_pids,
+        }
+
+    raise HTTPException(status_code=500, detail="Failed to resume CUDA processes")
 
 if __name__ == "__main__":
     import uvicorn
