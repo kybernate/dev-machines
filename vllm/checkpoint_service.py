@@ -23,6 +23,13 @@ CUDA_TOGGLE_MAX_WORKERS = int(os.getenv("CUDA_TOGGLE_MAX_WORKERS", "0"))  # 0 =>
 CUDA_TOGGLE_VERIFY_ATTEMPTS = int(os.getenv("CUDA_TOGGLE_VERIFY_ATTEMPTS", "50"))
 CUDA_TOGGLE_VERIFY_SLEEP_S = float(os.getenv("CUDA_TOGGLE_VERIFY_SLEEP_S", "0.2"))
 
+# Status endpoint performance
+CUDA_STATE_PARALLEL = os.getenv("CUDA_STATE_PARALLEL", "1").lower() in ("1", "true", "yes")
+CUDA_STATE_MAX_WORKERS = int(os.getenv("CUDA_STATE_MAX_WORKERS", "0"))  # 0 => auto
+STATUS_CACHE_TTL_S = float(os.getenv("STATUS_CACHE_TTL_S", "0.5"))
+_LAST_STATUS_CACHE: Optional[dict] = None
+_LAST_STATUS_TS: float = 0.0
+
 class StatusResponse(BaseModel):
     state: str
     cuda_states: dict
@@ -176,22 +183,36 @@ def find_vllm_gpu_pids() -> List[int]:
 
 def get_cuda_states(pids: List[int]) -> dict:
     """Prüft für jede PID den CUDA-Status. Filtert Nicht-CUDA-Prozesse."""
-    states = {}
-    for pid in pids:
+    if not pids:
+        return {}
+
+    def _one(pid: int):
         try:
             res = subprocess.run(
                 ["cuda-checkpoint", "--get-state", "--pid", str(pid)],
-                capture_output=True, text=True, timeout=2
+                capture_output=True,
+                text=True,
+                timeout=2,
             )
             if res.returncode == 0:
-                states[pid] = res.stdout.strip().lower()
-            else:
-                # Kann Non-CUDA sein, aber auch Rechte/Tool/Timing-Probleme.
-                # Nicht als Erfolg werten.
-                states[pid] = "unknown"
-        except:
-            states[pid] = "error"
-    return states
+                return pid, res.stdout.strip().lower()
+            # Kann Non-CUDA sein, aber auch Rechte/Tool/Timing-Probleme.
+            return pid, "unknown"
+        except Exception:
+            return pid, "error"
+
+    # Parallelize state probing, because UI polls frequently and TP spawns multiple workers.
+    if CUDA_STATE_PARALLEL and len(pids) > 1:
+        max_workers = CUDA_STATE_MAX_WORKERS or min(len(pids), 8)
+        states: dict = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_one, pid) for pid in pids]
+            for f in as_completed(futures):
+                pid, st = f.result()
+                states[pid] = st
+        return states
+
+    return {pid: st for pid, st in (_one(pid) for pid in pids)}
 
 
 def find_vllm_cuda_pids() -> List[int]:
@@ -202,6 +223,15 @@ def find_vllm_cuda_pids() -> List[int]:
     cuda-checkpoint can still get/toggle state.
     """
     global LAST_CUDA_PIDS
+
+    # Fast-path: prefer previously known CUDA-controllable PIDs to avoid
+    # scanning the full process tree on every /status call.
+    if LAST_CUDA_PIDS:
+        states = get_cuda_states(list(LAST_CUDA_PIDS))
+        cuda_pids = [pid for pid, st in states.items() if st in ["running", "checkpointed"]]
+        if cuda_pids:
+            LAST_CUDA_PIDS = sorted(cuda_pids)
+            return LAST_CUDA_PIDS
 
     candidates = find_all_vllm_pids()
     if not candidates:
@@ -217,6 +247,12 @@ def find_vllm_cuda_pids() -> List[int]:
     # Fallback: if we previously found CUDA PIDs, keep using them.
     # (Useful if the process tree is stable but state probing is momentarily flaky.)
     return list(LAST_CUDA_PIDS)
+
+
+def _invalidate_status_cache() -> None:
+    global _LAST_STATUS_CACHE, _LAST_STATUS_TS
+    _LAST_STATUS_CACHE = None
+    _LAST_STATUS_TS = 0.0
 
 def toggle_cuda_processes(target_state: str):
     """
@@ -395,6 +431,15 @@ async def ready():
 
 @app.get("/status", response_model=StatusResponse)
 async def status():
+    global _LAST_STATUS_CACHE, _LAST_STATUS_TS
+
+    # The dashboard polls this every 500ms. On multi-GPU (tensor-parallel) setups,
+    # probing cuda-checkpoint can be expensive; use a short TTL cache.
+    if STATUS_CACHE_TTL_S > 0 and _LAST_STATUS_CACHE is not None:
+        age = time.monotonic() - _LAST_STATUS_TS
+        if age >= 0 and age < STATUS_CACHE_TTL_S:
+            return _LAST_STATUS_CACHE
+
     pids = find_all_vllm_pids()
     cuda_pids = find_vllm_cuda_pids()
     states = get_cuda_states(cuda_pids) if cuda_pids else {}
@@ -403,7 +448,7 @@ async def status():
     logical = _logical_from_cuda_states(states)
     cuda_state = _aggregate_cuda_state(states)
 
-    return StatusResponse(
+    payload = StatusResponse(
         state=logical,
         cuda_states=states,
         cuda_state=cuda_state,
@@ -412,8 +457,13 @@ async def status():
         active_pids=cuda_pids
     )
 
+    _LAST_STATUS_CACHE = payload.model_dump()
+    _LAST_STATUS_TS = time.monotonic()
+    return payload
+
 @app.post("/checkpoint/dump")
 async def dump():
+    _invalidate_status_cache()
     # Backwards-compatible response expected by controller:
     # {status, toggled, state, cuda_state}
     cuda_pids = find_vllm_cuda_pids()
@@ -454,6 +504,7 @@ async def dump():
 
 @app.post("/checkpoint/restore")
 async def restore():
+    _invalidate_status_cache()
     cuda_pids = find_vllm_cuda_pids()
     if not cuda_pids:
         raise HTTPException(status_code=503, detail="No CUDA PIDs found")
