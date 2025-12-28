@@ -6,6 +6,7 @@ import subprocess
 import os
 import httpx
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = FastAPI(
     title="vLLM Checkpoint Service",
@@ -15,6 +16,12 @@ app = FastAPI(
 
 VLLM_PID_FILE = Path("/tmp/vllm.pid")
 VLLM_API_URL = os.getenv("VLLM_API_URL", "http://127.0.0.1:8000")
+
+# Toggle behavior (useful for tensor-parallel multi-GPU setups)
+CUDA_TOGGLE_PARALLEL = os.getenv("CUDA_TOGGLE_PARALLEL", "1").lower() in ("1", "true", "yes")
+CUDA_TOGGLE_MAX_WORKERS = int(os.getenv("CUDA_TOGGLE_MAX_WORKERS", "0"))  # 0 => auto
+CUDA_TOGGLE_VERIFY_ATTEMPTS = int(os.getenv("CUDA_TOGGLE_VERIFY_ATTEMPTS", "50"))
+CUDA_TOGGLE_VERIFY_SLEEP_S = float(os.getenv("CUDA_TOGGLE_VERIFY_SLEEP_S", "0.2"))
 
 class StatusResponse(BaseModel):
     state: str
@@ -228,36 +235,59 @@ def toggle_cuda_processes(target_state: str):
     toggled_any = False
     ok = True
 
-    print(f"[checkpoint] Target: {target_state}. GPU PIDs: {pids}. States: {states}")
+    print(f"[checkpoint] Target: {target_state}. CUDA PIDs: {pids}. States: {states}")
 
-    for pid in pids:
-        current = states.get(pid, "unknown")
-        if current == desired:
-            continue
+    to_toggle = [pid for pid in pids if states.get(pid, "unknown") != desired]
+    if not to_toggle:
+        # Already in desired state.
+        return True
 
+    def _toggle_one(pid: int):
         try:
-            subprocess.run(["cuda-checkpoint", "--toggle", "--pid", str(pid)], check=True)
-            toggled_any = True
+            res = subprocess.run(
+                ["cuda-checkpoint", "--toggle", "--pid", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            return pid, res.returncode, (res.stdout or ""), (res.stderr or "")
         except Exception as e:
-            print(f"[checkpoint] Failed to toggle PID {pid}: {e}")
-            ok = False
-            continue
+            return pid, -1, "", str(e)
 
-        # Verifikation: state muss sich in Richtung desired bewegen.
-        verified = False
-        for _ in range(5):
-            time.sleep(0.2)
-            new_state = get_cuda_states([pid]).get(pid, "unknown")
-            if new_state == desired:
-                verified = True
-                break
-        if not verified:
-            print(f"[checkpoint] PID {pid} did not reach desired state '{desired}'.")
-            ok = False
+    # Toggle concurrently (important for multi-GPU / tensor-parallel)
+    if CUDA_TOGGLE_PARALLEL and len(to_toggle) > 1:
+        max_workers = CUDA_TOGGLE_MAX_WORKERS or min(len(to_toggle), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_toggle_one, pid) for pid in to_toggle]
+            results = [f.result() for f in as_completed(futures)]
+    else:
+        results = [_toggle_one(pid) for pid in to_toggle]
 
-    # Wenn wir hier nichts togglen mussten (weil schon in desired), ist das ok.
-    # Aber "gar keine PIDs" ist oben bereits ein Fehler.
-    return ok and (toggled_any or all(st == desired for st in states.values()))
+    # If any toggle command errored, log it (final success is still determined by states).
+    for pid, rc, out, err in results:
+        if rc != 0:
+            print(f"[checkpoint] cuda-checkpoint toggle failed for PID {pid}: rc={rc} err={err.strip()} out={out.strip()}")
+            ok = False
+        else:
+            toggled_any = True
+
+    # Verification: all PIDs should reach desired within a bounded time.
+    verified_all = False
+    for _ in range(max(1, CUDA_TOGGLE_VERIFY_ATTEMPTS)):
+        time.sleep(CUDA_TOGGLE_VERIFY_SLEEP_S)
+        new_states = get_cuda_states(pids)
+        if all(new_states.get(pid, "unknown") == desired for pid in pids):
+            verified_all = True
+            ok = True  # if the state matches, treat it as success
+            break
+
+    if not verified_all:
+        final_states = get_cuda_states(pids)
+        print(f"[checkpoint] Not all PIDs reached desired state '{desired}'. Final states: {final_states}")
+        return False
+
+    # If we got here, all PIDs are in desired state.
+    return True
 
 
 def _logical_from_cuda_states(states: dict) -> str:
