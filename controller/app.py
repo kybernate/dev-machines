@@ -48,6 +48,11 @@ MAX_REQUESTS_PER_WINDOW = int(os.getenv("MAX_REQUESTS_PER_WINDOW", "8"))
 MAX_WINDOW_DURATION_MS = int(os.getenv("MAX_WINDOW_DURATION_MS", "500"))
 IDLE_SLEEP_MS = int(os.getenv("IDLE_SLEEP_MS", "20"))
 
+# Checkpoint service requests can take longer than 10s on multi-GPU / tensor-parallel.
+# Make these configurable so restore/dump don't time out prematurely.
+CHECKPOINT_HTTP_TIMEOUT_S = float(os.getenv("CHECKPOINT_HTTP_TIMEOUT_S", "60"))
+CHECKPOINT_HTTP_CONNECT_TIMEOUT_S = float(os.getenv("CHECKPOINT_HTTP_CONNECT_TIMEOUT_S", "5"))
+
 
 @dataclass
 class BackendConfig:
@@ -267,7 +272,13 @@ async def call_checkpoint_api(backend_key: str, action: str) -> Dict[str, Any]:
     cfg = backends[backend_key]
     url = f"{cfg.checkpoint_base_url}/checkpoint/{action}"
     try:
-        resp = await client.post(url, json={}, timeout=10.0)
+        timeout = httpx.Timeout(
+            connect=CHECKPOINT_HTTP_CONNECT_TIMEOUT_S,
+            read=CHECKPOINT_HTTP_TIMEOUT_S,
+            write=CHECKPOINT_HTTP_TIMEOUT_S,
+            pool=CHECKPOINT_HTTP_CONNECT_TIMEOUT_S,
+        )
+        resp = await client.post(url, json={}, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
         logger.info(
@@ -278,11 +289,43 @@ async def call_checkpoint_api(backend_key: str, action: str) -> Dict[str, Any]:
             data.get("cuda_state"),
         )
         return data
+    except httpx.ReadTimeout:
+        logger.error(
+            "Checkpoint %s on %s timed out after %.1fs: %s",
+            action,
+            backend_key,
+            CHECKPOINT_HTTP_TIMEOUT_S,
+            url,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"checkpoint {action} timed out for {backend_key} after "
+                f"{CHECKPOINT_HTTP_TIMEOUT_S:.1f}s"
+            ),
+        )
+    except httpx.HTTPStatusError as e:
+        body = ""
+        try:
+            body = e.response.text
+        except Exception:
+            body = ""
+        logger.error(
+            "Checkpoint %s on %s returned HTTP %s. Body: %s",
+            action,
+            backend_key,
+            e.response.status_code,
+            (body or "")[:2000],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"checkpoint {action} failed for {backend_key}: HTTP {e.response.status_code}",
+        )
     except httpx.HTTPError as e:
         logger.error("Failed to call checkpoint %s on %s: %s", action, backend_key, e)
         raise HTTPException(
             status_code=502,
-            detail=f"checkpoint {action} failed for {backend_key}: {e}",
+            detail=f"checkpoint {action} failed for {backend_key}: {type(e).__name__}",
         )
 
 

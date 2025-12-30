@@ -22,6 +22,7 @@ CUDA_TOGGLE_PARALLEL = os.getenv("CUDA_TOGGLE_PARALLEL", "1").lower() in ("1", "
 CUDA_TOGGLE_MAX_WORKERS = int(os.getenv("CUDA_TOGGLE_MAX_WORKERS", "0"))  # 0 => auto
 CUDA_TOGGLE_VERIFY_ATTEMPTS = int(os.getenv("CUDA_TOGGLE_VERIFY_ATTEMPTS", "50"))
 CUDA_TOGGLE_VERIFY_SLEEP_S = float(os.getenv("CUDA_TOGGLE_VERIFY_SLEEP_S", "0.2"))
+CUDA_TOGGLE_MAX_ROUNDS = int(os.getenv("CUDA_TOGGLE_MAX_ROUNDS", "2"))
 
 # Status endpoint performance
 CUDA_STATE_PARALLEL = os.getenv("CUDA_STATE_PARALLEL", "1").lower() in ("1", "true", "yes")
@@ -260,25 +261,16 @@ def toggle_cuda_processes(target_state: str):
     target_state: 'suspend' (wird zu checkpointed) oder 'resume' (wird zu running)
     """
     # Wichtig: Wir wollen wirklich die CUDA-kontrollierbaren Worker togglen.
+    # Like cuda-toggle-all, rely on cuda-checkpoint state probing (not /dev/nvidia fd scans).
     pids = find_vllm_cuda_pids()
     if not pids:
         print("[checkpoint] No vLLM CUDA PIDs found; refusing to report success.")
         return False
 
-    states = get_cuda_states(pids)
-
     desired = "checkpointed" if target_state == "suspend" else "running"
-    toggled_any = False
-    ok = True
+    rounds = max(1, CUDA_TOGGLE_MAX_ROUNDS)
 
-    print(f"[checkpoint] Target: {target_state}. CUDA PIDs: {pids}. States: {states}")
-
-    to_toggle = [pid for pid in pids if states.get(pid, "unknown") != desired]
-    if not to_toggle:
-        # Already in desired state.
-        return True
-
-    def _toggle_one(pid: int):
+    def _toggle_one(pid: int, state_before: str):
         try:
             res = subprocess.run(
                 ["cuda-checkpoint", "--toggle", "--pid", str(pid)],
@@ -286,44 +278,73 @@ def toggle_cuda_processes(target_state: str):
                 text=True,
                 timeout=30,
             )
-            return pid, res.returncode, (res.stdout or ""), (res.stderr or "")
+            return pid, state_before, res.returncode, (res.stdout or ""), (res.stderr or "")
         except Exception as e:
-            return pid, -1, "", str(e)
+            return pid, state_before, -1, "", str(e)
 
-    # Toggle concurrently (important for multi-GPU / tensor-parallel)
-    if CUDA_TOGGLE_PARALLEL and len(to_toggle) > 1:
-        max_workers = CUDA_TOGGLE_MAX_WORKERS or min(len(to_toggle), 8)
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(_toggle_one, pid) for pid in to_toggle]
-            results = [f.result() for f in as_completed(futures)]
-    else:
-        results = [_toggle_one(pid) for pid in to_toggle]
+    for round_idx in range(rounds):
+        # Refresh the PID set each round (process trees can change in TP setups).
+        # Keep it cheap by reusing LAST_CUDA_PIDS when possible.
+        refreshed = find_vllm_cuda_pids()
+        if refreshed and refreshed != pids:
+            print(f"[checkpoint] CUDA PID set changed: {pids} -> {refreshed}")
+            pids = refreshed
 
-    # If any toggle command errored, log it (final success is still determined by states).
-    for pid, rc, out, err in results:
-        if rc != 0:
-            print(f"[checkpoint] cuda-checkpoint toggle failed for PID {pid}: rc={rc} err={err.strip()} out={out.strip()}")
-            ok = False
+        states = get_cuda_states(pids)
+        print(f"[checkpoint] Round {round_idx+1}/{rounds}. Target: {target_state}. CUDA PIDs: {pids}. States: {states}")
+
+        to_toggle = [pid for pid in pids if states.get(pid, "unknown") != desired]
+        if not to_toggle:
+            # Already in desired state.
+            return True
+
+        # Toggle concurrently (important for multi-GPU / tensor-parallel)
+        if CUDA_TOGGLE_PARALLEL and len(to_toggle) > 1:
+            max_workers = CUDA_TOGGLE_MAX_WORKERS or min(len(to_toggle), 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = [ex.submit(_toggle_one, pid, states.get(pid, "unknown")) for pid in to_toggle]
+                results = [f.result() for f in as_completed(futures)]
         else:
-            toggled_any = True
+            results = [_toggle_one(pid, states.get(pid, "unknown")) for pid in to_toggle]
 
-    # Verification: all PIDs should reach desired within a bounded time.
-    verified_all = False
-    for _ in range(max(1, CUDA_TOGGLE_VERIFY_ATTEMPTS)):
-        time.sleep(CUDA_TOGGLE_VERIFY_SLEEP_S)
-        new_states = get_cuda_states(pids)
-        if all(new_states.get(pid, "unknown") == desired for pid in pids):
-            verified_all = True
-            ok = True  # if the state matches, treat it as success
-            break
+        # If any toggle command errored, log it (final success is still determined by states).
+        saw_os_unsupported = False
+        for pid, state_before, rc, out, err in results:
+            if rc != 0:
+                err_s = (err or "").strip()
+                if "OS call failed" in err_s or "operation not supported" in err_s:
+                    saw_os_unsupported = True
+                print(
+                    f"[checkpoint] cuda-checkpoint toggle failed for PID {pid}: "
+                    f"state_before={state_before} rc={rc} err={err_s} out={(out or '').strip()}"
+                )
 
-    if not verified_all:
+        if saw_os_unsupported and target_state == "resume":
+            print(
+                "[checkpoint] HINT: resume failures with 'OS call failed' are often caused by CUDA IPC/UVM usage in multi-process NCCL. "
+                "Try setting NCCL_P2P_DISABLE=1 and NCCL_SHM_DISABLE=1 on the vLLM container."
+            )
+
+        # Verification: all PIDs should reach desired within a bounded time.
+        for _ in range(max(1, CUDA_TOGGLE_VERIFY_ATTEMPTS)):
+            time.sleep(CUDA_TOGGLE_VERIFY_SLEEP_S)
+            new_states = get_cuda_states(pids)
+            if all(new_states.get(pid, "unknown") == desired for pid in pids):
+                return True
+
+        # Not converged; try another round (if available)
         final_states = get_cuda_states(pids)
-        print(f"[checkpoint] Not all PIDs reached desired state '{desired}'. Final states: {final_states}")
-        return False
+        print(
+            f"[checkpoint] Round {round_idx+1}/{rounds} did not converge to '{desired}'. "
+            f"States now: {final_states}"
+        )
 
-    # If we got here, all PIDs are in desired state.
-    return True
+    final_states = get_cuda_states(pids)
+    print(
+        f"[checkpoint] Not all PIDs reached desired state '{desired}' after {rounds} rounds. "
+        f"Final states: {final_states}"
+    )
+    return False
 
 
 def _logical_from_cuda_states(states: dict) -> str:

@@ -17,9 +17,19 @@ services:
               count: all      # or "all" – depending on setup
               capabilities: [gpu]
     ipc: host
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
     environment:
-      - VLLM_USE_V1=${VLLM_USE_V1_A:-0}
+      # vLLM v0.11+ expects the V1 engine by default; forcing 0 can crash with AssertionError.
+      - VLLM_USE_V1=${VLLM_USE_V1_A:-1}
       - CHECKPOINT_SERVICE_PORT=9000
+      - NCCL_P2P_DISABLE=1
+      - NCCL_SHM_DISABLE=1
+      - CUDA_TOGGLE_MAX_ROUNDS=${CUDA_TOGGLE_MAX_ROUNDS:-2}
+      - CUDA_TOGGLE_VERIFY_ATTEMPTS=${CUDA_TOGGLE_VERIFY_ATTEMPTS:-50}
+      - CUDA_TOGGLE_VERIFY_SLEEP_S=${CUDA_TOGGLE_VERIFY_SLEEP_S:-0.2}
     volumes:
       - ./.cache/models:/root/.cache/huggingface
       - ./.cache/vllm:/root/.cache/vllm
@@ -58,9 +68,19 @@ services:
               count: all
               capabilities: [gpu]
     ipc: host
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
     environment:
-      - VLLM_USE_V1=${VLLM_USE_V1_B:-0}
+      # vLLM v0.11+ expects the V1 engine by default; forcing 0 can crash with AssertionError.
+      - VLLM_USE_V1=${VLLM_USE_V1_B:-1}
       - CHECKPOINT_SERVICE_PORT=9000
+      - NCCL_P2P_DISABLE=1
+      - NCCL_SHM_DISABLE=1
+      - CUDA_TOGGLE_MAX_ROUNDS=${CUDA_TOGGLE_MAX_ROUNDS:-2}
+      - CUDA_TOGGLE_VERIFY_ATTEMPTS=${CUDA_TOGGLE_VERIFY_ATTEMPTS:-50}
+      - CUDA_TOGGLE_VERIFY_SLEEP_S=${CUDA_TOGGLE_VERIFY_SLEEP_S:-0.2}
     volumes:
       - ./.cache/models:/root/.cache/huggingface
       - ./.cache/vllm:/root/.cache/vllm
@@ -107,6 +127,8 @@ services:
       - MAX_REQUESTS_PER_WINDOW=${MAX_REQUESTS_PER_WINDOW}
       - MAX_WINDOW_DURATION_MS=${MAX_WINDOW_DURATION_MS}
       - IDLE_SLEEP_MS=${IDLE_SLEEP_MS}
+      - CHECKPOINT_HTTP_TIMEOUT_S=${CHECKPOINT_HTTP_TIMEOUT_S:-60}
+      - CHECKPOINT_HTTP_CONNECT_TIMEOUT_S=${CHECKPOINT_HTTP_CONNECT_TIMEOUT_S:-5}
     ports:
       - "8000:8000"
 
