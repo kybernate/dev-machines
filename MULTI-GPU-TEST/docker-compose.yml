@@ -1,0 +1,44 @@
+services:
+  vllm-qwen3-8b-awq:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VLLM_VERSION: ${VLLM_VERSION:-v0.11.0}
+    image: vllm-qwen3-8b-awq:local
+    container_name: vllm-qwen3-8b-awq
+    ipc: host
+    gpus: all
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      # Keep all HF/vLLM caches under /root/.cache, backed by ../.cache on the host
+      - HF_HOME=/root/.cache/huggingface
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      - XDG_CACHE_HOME=/root/.cache
+      # cuda-checkpoint restore currently does not support CUDA IPC/UVM allocations.
+      # vLLM tensor-parallel uses NCCL, which may rely on CUDA IPC / P2P; these knobs
+      # attempt to keep NCCL on non-P2P paths so checkpoint restore can succeed.
+      - NCCL_P2P_DISABLE=1
+      - NCCL_SHM_DISABLE=1
+      # Tuning for cuda-toggle-all verification loops
+      - CUDA_TOGGLE_VERIFY_ATTEMPTS=${CUDA_TOGGLE_VERIFY_ATTEMPTS:-50}
+      - CUDA_TOGGLE_VERIFY_SLEEP_S=${CUDA_TOGGLE_VERIFY_SLEEP_S:-0.2}
+    volumes:
+      # IMPORTANT: shared cache folder in project root (ONLY integration point)
+      - ../.cache:/root/.cache
+    ports:
+      - "8010:8000"
+    command: >
+      --model Qwen/Qwen3-8B-AWQ
+      --served-model-name qwen3-8b-awq
+      --quantization awq
+      --dtype half
+      --max-model-len 8192
+      --gpu-memory-utilization 0.80
+      --tensor-parallel-size 2
+      --enforce-eager
+      --host 0.0.0.0
+      --port 8000
