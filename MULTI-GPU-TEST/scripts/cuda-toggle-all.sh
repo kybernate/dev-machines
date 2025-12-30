@@ -9,6 +9,8 @@ fi
 
 VERIFY_ATTEMPTS="${CUDA_TOGGLE_VERIFY_ATTEMPTS:-50}"
 VERIFY_SLEEP_S="${CUDA_TOGGLE_VERIFY_SLEEP_S:-0.2}"
+TOGGLE_PARALLEL="${CUDA_TOGGLE_PARALLEL:-1}"
+TOGGLE_MAX_WORKERS="${CUDA_TOGGLE_MAX_WORKERS:-0}" # 0 => auto
 
 main_pid="$(pgrep -f "vllm.entrypoints.openai.api_server" | head -n1 || true)"
 if [[ -z "${main_pid}" ]]; then
@@ -63,6 +65,48 @@ get_cuda_pids() {
   done
 }
 
+toggle_one_pid() {
+  local pid="$1"
+  local st_before="$2"
+
+  if ! cuda-checkpoint --toggle --pid "${pid}" >/dev/null 2>&1; then
+    echo "[cuda-toggle-all] WARN: toggle failed for pid=${pid} (state=${st_before})" >&2
+    return 1
+  fi
+  return 0
+}
+
+toggle_pids_parallel() {
+  local -a pids=("$@")
+  local max_workers="${TOGGLE_MAX_WORKERS}"
+
+  if [[ "${max_workers}" -le 0 ]]; then
+    # Safe default: small parallelism; enough to cover TP=2 without overloading.
+    if [[ "${#pids[@]}" -le 8 ]]; then
+      max_workers="${#pids[@]}"
+    else
+      max_workers=8
+    fi
+  fi
+
+  # Launch with bounded concurrency.
+  local pid st
+  for pid in "${pids[@]}"; do
+    st="$(cuda_state_of_pid "${pid}")"
+    toggle_one_pid "${pid}" "${st}" &
+
+    # If we're at the limit, wait for one job to finish.
+    while [[ "$(jobs -rp | wc -l)" -ge "${max_workers}" ]]; do
+      wait -n || true
+    done
+  done
+
+  # Wait for remaining jobs.
+  while [[ "$(jobs -rp | wc -l)" -gt 0 ]]; do
+    wait -n || true
+  done
+}
+
 # Loop: toggle any pid not in target state, until all are in target.
 for attempt in $(seq 1 "${VERIFY_ATTEMPTS}"); do
   mapfile -t cuda_pids < <(get_cuda_pids)
@@ -73,15 +117,25 @@ for attempt in $(seq 1 "${VERIFY_ATTEMPTS}"); do
   fi
 
   all_ok=1
+  to_toggle=()
   for pid in "${cuda_pids[@]}"; do
     st="$(cuda_state_of_pid "${pid}")"
     if [[ "${st}" != "${TARGET_STATE}" ]]; then
       all_ok=0
-      if ! cuda-checkpoint --toggle --pid "${pid}" >/dev/null 2>&1; then
-        echo "[cuda-toggle-all] WARN: toggle failed for pid=${pid} (state=${st})" >&2
-      fi
+      to_toggle+=("${pid}")
     fi
   done
+
+  if [[ "${all_ok}" -eq 0 && "${#to_toggle[@]}" -gt 0 ]]; then
+    if [[ "${TOGGLE_PARALLEL}" == "1" || "${TOGGLE_PARALLEL,,}" == "true" || "${TOGGLE_PARALLEL,,}" == "yes" ]]; then
+      toggle_pids_parallel "${to_toggle[@]}"
+    else
+      for pid in "${to_toggle[@]}"; do
+        st="$(cuda_state_of_pid "${pid}")"
+        toggle_one_pid "${pid}" "${st}" || true
+      done
+    fi
+  fi
 
   if [[ "${all_ok}" -eq 1 ]]; then
     echo "[cuda-toggle-all] OK: all CUDA PIDs are '${TARGET_STATE}'" >&2

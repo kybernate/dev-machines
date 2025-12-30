@@ -1,5 +1,20 @@
 # Copy/paste curl commands (vLLM @ :8010)
 
+## 0) Start the vLLM container (Docker Compose)
+
+From the repo root:
+
+```bash
+mkdir -p ../.cache
+docker compose up -d --build
+```
+
+Optional: follow logs while it loads the model:
+
+```bash
+docker compose logs -f vllm-qwen3-8b-awq
+```
+
 ## 1) Ask the model its name (chat completion)
 
 Copy/paste this as-is:
